@@ -14,7 +14,37 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: "10mb" }));
+
 console.log("Supabase initialized");
+
+// ----------------------
+// TEST ROUTES (for browser checks)
+// ----------------------
+app.get("/", (req, res) => {
+  res.send({ message: "AttendRight Backend is Live 🚀" });
+});
+
+app.get("/api/attendance", (req, res) => {
+  res.json({
+    success: true,
+    note: "Use POST /api/attendance with clientId + base64Image to upload attendance",
+  });
+});
+
+app.get("/api/timetable", (req, res) => {
+  res.json({
+    success: true,
+    note: "Use POST /api/timetable with clientId + base64Image to upload timetable",
+  });
+});
+
+app.get("/api/chat", (req, res) => {
+  res.json({
+    success: true,
+    note: "Use POST /api/chat with clientId + message to chat",
+  });
+});
+
 // ----------------------
 // 1) TIMETABLE UPLOAD
 // ----------------------
@@ -24,7 +54,6 @@ app.post("/api/timetable", async (req, res) => {
     if (!clientId || !base64Image)
       return res.status(400).json({ error: "clientId and base64Image required" });
 
-    // Call Gemini to extract timetable JSON and explanation
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -51,7 +80,6 @@ If you cannot extract, return ---JSON---{}--Could not extract timetable.`
     const data = await response.json();
     const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-    // Split JSON + explanation
     let timetableJson = {};
     let explanation = "Could not extract timetable.";
 
@@ -68,7 +96,6 @@ If you cannot extract, return ---JSON---{}--Could not extract timetable.`
       }
     }
 
-    // Save in Supabase only if timetableJson is not empty
     if (timetableJson && timetableJson.days && Object.keys(timetableJson.days).length > 0) {
       const { error: insertError } = await supabase.from("timetables").insert([
         {
@@ -90,6 +117,7 @@ If you cannot extract, return ---JSON---{}--Could not extract timetable.`
     res.status(500).json({ result: "Error analyzing timetable." });
   }
 });
+
 // ----------------------
 // 2) ATTENDANCE UPLOAD
 // ----------------------
@@ -99,7 +127,6 @@ app.post("/api/attendance", async (req, res) => {
     if (!clientId || !base64Image)
       return res.status(400).json({ error: "clientId and base64Image required" });
 
-    // Call Gemini to extract attendance JSON
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -116,8 +143,7 @@ Return a machine-readable JSON array like:
   { "Subject": "Math", "Total": 40, "Present": 36, "Percentage %": "90" },
   ...
 ]
-If you cannot extract, return an empty array [].
-`
+If you cannot extract, return an empty array [].`
                 },
                 { inline_data: { mime_type: "image/png", data: base64Image } },
               ],
@@ -130,10 +156,8 @@ If you cannot extract, return an empty array [].
     const data = await response.json();
     const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-    // Try to extract JSON array from Gemini response
     let attendanceData = [];
     try {
-      // Find the first [ ... ] block in the response
       const match = raw.match(/\[([\s\S]*?)\]/);
       if (match) {
         attendanceData = JSON.parse(match[0]);
@@ -143,7 +167,6 @@ If you cannot extract, return an empty array [].
       attendanceData = [];
     }
 
-    // Save in Supabase only if attendanceData is not empty
     if (Array.isArray(attendanceData) && attendanceData.length > 0) {
       const { error: insertError } = await supabase.from("attendance").insert([
         {
@@ -164,6 +187,7 @@ If you cannot extract, return an empty array [].
     res.status(500).json({ result: "Error uploading attendance." });
   }
 });
+
 // ----------------------
 // 3) CHAT WITH CONTEXT
 // ----------------------
@@ -173,25 +197,19 @@ app.post("/api/chat", async (req, res) => {
     if (!clientId || !message)
       return res.status(400).json({ error: "clientId and message required" });
 
-    // fetch latest timetable
-    const { data: tt, error: ttErr } = await supabase
+    const { data: tt } = await supabase
       .from("timetables")
       .select("timetable, analyzed_text, created_at")
       .eq("user_id", clientId)
       .order("created_at", { ascending: false })
       .limit(1);
 
-    if (ttErr) console.error("Supabase timetable fetch error:", ttErr);
-
-    // fetch latest attendance
-    const { data: attRows, error: attErr } = await supabase
+    const { data: attRows } = await supabase
       .from("attendance")
       .select("attendance_data, created_at")
       .eq("user_id", clientId)
       .order("created_at", { ascending: false })
       .limit(1);
-
-    if (attErr) console.error("Supabase attendance fetch error:", attErr);
 
     let attendanceText = "";
     if (attRows && attRows.length > 0) {
@@ -208,10 +226,8 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    const timetableText =
-      tt?.[0]?.analyzed_text || "(no timetable found)";
+    const timetableText = tt?.[0]?.analyzed_text || "(no timetable found)";
 
-    // prompt
     const system = `You are a student advisor. Use the timetable and attendance to give personalized advice.
 - If asked "what can I miss", compute: bunkable = floor(max(0, (A / (p/100)) - T)).
 - If asked "how to reach X%", compute: need = ceil(p*T - A).
@@ -226,7 +242,6 @@ Attendance:
 ${attendanceText}
 `;
 
-    // call Gemini
     const gRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -249,6 +264,7 @@ ${attendanceText}
     res.status(500).json({ error: "chat error" });
   }
 });
+
 // ----------------------
 // 4) CLEAR DATA
 // ----------------------
@@ -257,7 +273,6 @@ app.post("/api/clear", async (req, res) => {
     const { clientId } = req.body;
     if (!clientId) return res.status(400).json({ error: "clientId required" });
 
-    // delete timetable + attendance
     const { error: tErr } = await supabase.from("timetables").delete().eq("user_id", clientId);
     const { error: aErr } = await supabase.from("attendance").delete().eq("user_id", clientId);
 
@@ -272,5 +287,6 @@ app.post("/api/clear", async (req, res) => {
     res.status(500).json({ error: "clear error" });
   }
 });
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
